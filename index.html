@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RT-PCR Result Analyzer - Advanced</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center p-6">
+
+  <h1 class="text-3xl font-bold mb-6">🧬 Advanced RT-PCR Result Analyzer</h1>
+
+  <div class="bg-white p-6 rounded-lg shadow-lg w-full max-w-5xl">
+    <input type="file" id="fileInput" accept=".xlsx, .xls" class="mb-4 border p-2 rounded w-full">
+
+    <div id="output" class="overflow-x-auto my-4"></div>
+
+    <canvas id="ctChart" class="my-8"></canvas>
+
+    <div id="interpretations" class="mt-8"></div>
+
+    
+    <div id="summary" class="mt-8 p-4 bg-green-100 rounded shadow"></div>
+
+    <div class="mt-6 flex gap-4">
+      <button onclick="downloadExcel()" class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700">📥 Download Excel Report</button>
+      <button onclick="downloadPDF()" class="bg-red-600 text-white px-4 py-2 rounded shadow hover:bg-red-700">🖨️ Download PDF Report</button>
+    </div>
+    
+  </div>
+
+  <script>
+    document.getElementById('fileInput').addEventListener('change', handleFile);
+
+    function handleFile(e) {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        const data = new Uint8Array(event.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+        displayTable(jsonData);
+        analyzeData(jsonData);
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function displayTable(data) {
+      let html = '<table class="table-auto w-full text-left border-collapse">';
+      data.forEach((row, i) => {
+        html += '<tr>';
+        row.forEach(cell => {
+          html += `<td class="border px-4 py-2 ${i === 0 ? 'font-bold bg-gray-200' : ''}">${cell}</td>`;
+        });
+        html += '</tr>';
+      });
+      html += '</table>';
+      document.getElementById('output').innerHTML = html;
+    }
+
+    function analyzeData(data) {
+      if (data.length < 2) return;
+
+      const headers = data[0].map(h => h.toLowerCase());
+      const ctIndex = headers.findIndex(h => h.includes('ct'));
+      const ntcIndex = headers.findIndex(h => h.includes('ntc'));
+      const internalControlIndex = headers.findIndex(h => h.includes('control'));
+      const geneIndexes = headers.map((h, idx) => (h.includes('gene') ? idx : -1)).filter(idx => idx !== -1);
+
+      if (ctIndex === -1) {
+        alert("Couldn't find a 'Ct' column!");
+        return;
+      }
+
+      const sampleData = data.slice(1);
+      const ctValues = sampleData.map(row => parseFloat(row[ctIndex])).filter(val => !isNaN(val));
+      drawChart(ctValues);
+
+      let html = `<h2 class="text-2xl font-bold mb-4">Interpretations</h2>`;
+      let positiveCount = 0, negativeCount = 0, invalidCount = 0, retestCount = 0, contaminationDetected = false;
+
+      sampleData.forEach((row, index) => {
+        let ct = parseFloat(row[ctIndex]);
+        let interpretation = "";
+        if (isNaN(ct)) {
+          interpretation = "Invalid result ❓";
+          invalidCount++;
+        } else if (ct < 20) {
+          interpretation = "Very high viral load 🔥";
+          positiveCount++;
+        } else if (ct >= 20 && ct <= 30) {
+          interpretation = "Moderate viral load 🧬";
+          positiveCount++;
+        } else if (ct > 30 && ct <= 35) {
+          interpretation = "Low viral load 🧪";
+          positiveCount++;
+        } else if (ct > 35 && ct <= 38) {
+          interpretation = "Weak positive ⚠️ - Retesting recommended";
+          retestCount++;
+        } else if (ct > 38) {
+          interpretation = "Negative or late amplification 🌙";
+          negativeCount++;
+        }
+
+        // Contamination check (NTC should have no amplification)
+        if (ntcIndex !== -1 && parseFloat(row[ntcIndex]) < 35) {
+          contaminationDetected = true;
+        }
+
+        // Internal control check
+        let internalControlStatus = "Not Checked";
+        if (internalControlIndex !== -1) {
+          let controlCt = parseFloat(row[internalControlIndex]);
+          if (isNaN(controlCt) || controlCt > 35) {
+            internalControlStatus = "⚠️ Internal Control Failed - Sample Quality Issue";
+          } else {
+            internalControlStatus = "✅ Internal Control OK";
+          }
+        }
+
+        // Gene positivity interpretation
+        let geneStatus = "No gene data";
+        if (geneIndexes.length > 0) {
+          const positiveGenes = geneIndexes.filter(idx => parseFloat(row[idx]) < 35);
+          if (positiveGenes.length === geneIndexes.length) {
+            geneStatus = "✅ All target genes amplified - Confirmed Positive";
+          } else if (positiveGenes.length > 0) {
+            geneStatus = "⚠️ Partial gene amplification - Possible Variant or Early Infection";
+          } else {
+            geneStatus = "❌ No gene detected - Negative";
+          }
+        }
+
+        html += `<div class="mb-4 p-4 border rounded bg-gray-50">
+          <b>Sample ${index + 1}</b>: Ct = <b>${ct}</b> → ${interpretation}<br>
+          ${internalControlStatus}<br>
+          ${geneStatus}
+        </div>`;
+      });
+
+      document.getElementById('interpretations').innerHTML = html;
+
+      // Summary block
+      let summaryHtml = `<h2 class="text-2xl font-bold mb-2">🔍 Summary</h2>`;
+      summaryHtml += `<ul class="list-disc ml-6 text-lg">
+        <li><b>Positive samples:</b> ${positiveCount}</li>
+        <li><b>Negative samples:</b> ${negativeCount}</li>
+        <li><b>Retesting needed:</b> ${retestCount}</li>
+        <li><b>Invalid samples:</b> ${invalidCount}</li>
+        <li><b>Contamination detected:</b> ${contaminationDetected ? "⚠️ Yes - Batch retesting needed!" : "✅ No"}</li>
+      </ul>`;
+
+      document.getElementById('summary').innerHTML = summaryHtml;
+    }
+
+    function drawChart(ctValues) {
+      const ctx = document.getElementById('ctChart').getContext('2d');
+      new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: ctValues.map((_, i) => `Sample ${i + 1}`),
+          datasets: [{
+            label: 'Ct Value',
+            data: ctValues,
+            backgroundColor: 'rgba(54, 162, 235, 0.7)',
+            borderColor: 'rgba(54, 162, 235, 1)',
+            borderWidth: 1
+          }]
+        },
+        options: {
+          scales: {
+            y: {
+              beginAtZero: true,
+              suggestedMax: 40
+            }
+          }
+        }
+      });
+    }
+  </script>
+
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<script>
+  async function downloadPDF() {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+
+    // Title
+    const title = document.querySelector("h1").innerText;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(22);
+    doc.setTextColor(33, 150, 243); // Blue
+    doc.text(title, 40, 50);
+
+    // Summary Block
+    const summaryText = document.getElementById("summary").innerText.split("\n");
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(14);
+    doc.setTextColor(0, 0, 0);
+    let y = 90;
+    doc.setFillColor(220, 247, 207); // light green
+    doc.rect(30, 70, 540, summaryText.length * 18 + 20, "F");
+    summaryText.forEach(line => {
+      doc.text(line, 40, y);
+      y += 18;
+    });
+
+    // Interpretations Block
+    const interpText = document.getElementById("interpretations").innerText.split("\n");
+    y += 30;
+    doc.setFontSize(16);
+    doc.setTextColor(255, 87, 34); // orange
+    doc.text("Interpretations", 40, y);
+    y += 20;
+    doc.setFontSize(12);
+    doc.setTextColor(33, 33, 33); // dark gray
+    interpText.forEach(line => {
+      if (y > 750) { doc.addPage(); y = 50; }
+      doc.text(line, 40, y);
+      y += 16;
+    });
+
+    // Save the document
+    doc.save("RTPCR_Analysis_Report_Colorful.pdf");
+  }
+    </script>
+    </body>
+    
+</html>
